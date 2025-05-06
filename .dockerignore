@@ -1,0 +1,7 @@
+.gitattributes
+.gitignore
+.gitlab-ci.yml
+public/storage/
+README.md
+vendor
+node_modules

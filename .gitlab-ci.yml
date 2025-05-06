@@ -1,0 +1,286 @@
+stages:
+  - check-connect          # тест з'єднання SSH
+  - create-registry-image  # створення образу і завантаження на gitlab registry
+  - deploy-containers      # збірка і запуск Docker-контейнерів
+  - verify                 # перевірка, що бекенд працює
+  - debugging              # отримати логи з backend контейнера
+
+before_script:
+  - mkdir -p ~/.ssh
+  - echo "$GITLAB_DEPLOY_USER_KEY_BASE64" | base64 -d > ~/.ssh/id_rsa
+  - chmod 600 ~/.ssh/id_rsa
+  - ssh-keyscan $IP_PROD_SERVER >> ~/.ssh/known_hosts
+
+################################################################################
+####                 Jobs for main branch                                  #####
+################################################################################
+##### check-connect stage ######################################################
+check-connect_prod:
+  stage: check-connect
+  only:
+    - main
+  script:
+    - |
+      ssh $GITLAB_DEPLOY_USER@$IP_PROD_SERVER " \
+      bash -c ' \
+      touch tmp.txt || true && \
+      echo 'Connection success' > tmp.txt && \
+      cat tmp.txt && \
+      rm tmp.txt && \
+      echo "job has completed!" ' "
+
+##### create-registry-image stage ######################################################
+create-registry-image_prod:
+  stage: create-registry-image
+  only:
+    - main
+  script:
+    - cd $CI_PROJECT_DIR
+    - docker build -t $CI_REGISTRY_IMAGE:prod .
+
+    - docker login -u $REGISTRY_USER -p $REGISTRY_USER_PASS $CI_REGISTRY
+    - docker push $CI_REGISTRY_IMAGE:prod
+    - docker logout $CI_REGISTRY
+
+    - docker system prune -f
+
+##### deploy-containers stage ###########################################################
+deploy-containers_prod:
+  stage: deploy-containers
+  only:
+    - main
+  script:
+    - |
+      ssh $GITLAB_DEPLOY_USER@$IP_PROD_SERVER << EOF
+        set -ex
+        # зупиняємо попередні контейнери
+
+        cd docker-compose/triply
+        docker compose down || \
+        echo "Docker-compose is not loaded yet"
+
+        # завантажуємо новий образ backend
+        docker login -u $REGISTRY_USER -p $REGISTRY_USER_PASS $CI_REGISTRY
+        docker pull $CI_REGISTRY_IMAGE:prod
+        docker logout $CI_REGISTRY
+      EOF
+
+    - scp -r $CI_PROJECT_DIR/docker/prod/* $GITLAB_DEPLOY_USER@$IP_PROD_SERVER:/home/$GITLAB_DEPLOY_USER/docker-compose/triply
+    - scp -r "$ENV_CONTENT" $GITLAB_DEPLOY_USER@$IP_PROD_SERVER:/home/$GITLAB_DEPLOY_USER/docker-compose/triply/.env
+
+    - |
+      ssh $GITLAB_DEPLOY_USER@$IP_PROD_SERVER << EOF
+        set -ex
+
+        # Запускаємо контейнери
+        cd docker-compose/triply/
+
+        echo "Starting containers with docker compose..."
+        docker compose up -d
+
+        # Перевіряємо статус контейнерів
+        echo "Checking container status..."
+        docker compose ps
+
+        echo "Checking container logs for errors..."
+        docker logs php-fpm 2>&1 | grep -i "error\|exception\|fatal" || echo "No critical errors found in php-fpm logs"
+        docker logs caddy 2>&1 | grep -i "error\|exception\|fatal" || echo "No critical errors found in caddy logs"
+
+        # Виконуємо міграції через php-cli
+        #docker exec php-cli php artisan migrate --force --no-interaction
+
+        echo "Cleaning up unused Docker resources..."
+        docker system prune -f
+      EOF
+
+##### verify stage ###########################################################
+verify_deployment:
+  stage: verify
+  only:
+    - main
+  script:
+    - |
+      ssh $GITLAB_DEPLOY_USER@$IP_PROD_SERVER << EOF
+        echo "Waiting for backend to be ready..."
+        for i in {1..10}; do
+          curl -I https://api.triply.blog && exit 0
+          sleep 3
+        done
+        echo "Backend is not responding!"
+        exit 1
+      EOF
+
+##### debugging stage ##########################################################
+debugging_container-logs:
+  stage: debugging
+  only:
+    - main
+  script:
+    - |
+      ssh $GITLAB_DEPLOY_USER@$IP_DEV_SERVER << EOF
+        echo "logs from laravel.log:"
+        echo "******************************************:"
+        docker exec php-fpm tail -n 100 /app/storage/logs/laravel.log || \
+        echo "There are no logs from container"
+        echo "******************************************:"
+        echo "job has completed!"
+        echo "=========== docker ps -a ==========="
+        docker ps -a
+
+        echo
+        echo "=========== docker-compose ps ==========="
+        cd /home/$GITLAB_DEPLOY_USER/docker-compose/triply/
+        docker compose ps
+
+        echo
+        echo "=========== php-fpm logs ==========="
+        docker logs php-fpm 2>/dev/null || echo "php-fpm logs not found"
+
+        echo
+        echo "=========== caddy logs ==========="
+        docker logs caddy 2>/dev/null || echo "caddy logs not found"
+
+        echo
+        echo "=========== Laravel logs ==========="
+        cd /home/$GITLAB_DEPLOY_USER/docker-compose/triply/
+        ls -l storage/logs/
+        cat storage/logs/laravel.log || echo "No Laravel logs"
+
+        echo "=========== END ==========="
+      EOF
+
+debugging_docker-logs:
+  stage: debugging
+  only:
+    - main
+  script:
+    - |
+      ssh $GITLAB_DEPLOY_USER@$IP_PROD_SERVER << EOF
+
+        echo "logs from container:"
+        echo "******************************************:"
+        docker logs php-fpm
+        echo "******************************************:"
+        echo "job has completed!"
+      EOF
+
+################################################################################
+####                 Jobs for dev branch                                   #####
+################################################################################
+##### check-connect stage ######################################################
+check-connect_dev:
+  stage: check-connect
+  only:
+    - dev
+  script:
+    - |
+      ssh $GITLAB_DEPLOY_USER@$IP_DEV_SERVER << EOF
+        set -ex
+        touch ~/tmp.txt || true
+        echo 'CONNECTION SUCCESS' > ~/tmp.txt
+        cat ~/tmp.txt
+        rm ~/tmp.txt
+        echo "job has completed!"
+      EOF
+##### create-registry-image stage ######################################################
+create-registry-image_dev:
+  stage: create-registry-image
+  only:
+    - dev
+  script:
+    - cd $CI_PROJECT_DIR
+    - docker build -t $CI_REGISTRY_IMAGE:dev .
+
+    - docker login -u $REGISTRY_USER -p $REGISTRY_USER_PASS $CI_REGISTRY
+    - docker push $CI_REGISTRY_IMAGE:dev
+    - docker logout $CI_REGISTRY
+
+    - docker system prune -f
+
+##### deploy-containers stage ###########################################################
+deploy-containers_dev:
+  stage: deploy-containers
+  only:
+    - dev
+  script:
+    - |
+      ssh $GITLAB_DEPLOY_USER@$IP_DEV_SERVER << EOF
+        set -ex
+
+        # зупиняємо попередні контейнери
+        cd docker-compose/triply
+        docker compose down || \
+        echo "Docker-compose is not loaded yet"
+
+        # завантажуємо новий образ backend
+        docker login -u $REGISTRY_USER -p $REGISTRY_USER_PASS $CI_REGISTRY
+        docker pull $CI_REGISTRY_IMAGE:dev
+        docker logout $CI_REGISTRY_IMAGE
+      EOF
+
+      # завантажуємо новий docker-compose nginx.conf
+    - scp -r $CI_PROJECT_DIR/docker/dev/* $GITLAB_DEPLOY_USER@$IP_DEV_SERVER:/home/$GITLAB_DEPLOY_USER/docker-compose/triply
+
+    - |
+      ssh $GITLAB_DEPLOY_USER@$IP_DEV_SERVER << EOF
+        set -ex
+
+        # запускаємо контейнери
+        cd docker-compose/triply
+        docker compose up -d
+        docker system prune -f
+      EOF
+
+##### debugging stage ##########################################################
+debugging_container-logs-dev:
+  stage: debugging
+  only:
+    - dev
+  script:
+    - |
+      ssh $GITLAB_DEPLOY_USER@$IP_DEV_SERVER << EOF
+        echo "logs from laravel.log:"
+        echo "******************************************:"
+        docker exec triply-backend tail -n 100 /app/storage/logs/laravel.log || \
+        echo "There are no logs from container"
+        echo "******************************************:"
+        echo "job has completed!"
+        echo "=========== docker ps -a ==========="
+        docker ps -a
+
+        echo
+        echo "=========== docker-compose ps ==========="
+        cd /home/$USER/docker-compose/triply
+        docker compose -f compose.prod.yaml ps
+
+        echo
+        echo "=========== php-fpm logs ==========="
+        docker logs php-fpm 2>/dev/null || echo "php-fpm logs not found"
+
+        echo
+        echo "=========== caddy logs ==========="
+        docker logs caddy 2>/dev/null || echo "caddy logs not found"
+
+        echo
+        echo "=========== Laravel logs ==========="
+        cd /home/$USER/docker-compose/triply/backend
+        ls -l storage/logs/
+        cat storage/logs/laravel.log || echo "No Laravel logs"
+
+        echo "=========== END ==========="
+      EOF
+
+debugging_docker-logs-dev:
+  stage: debugging
+  only:
+    - dev
+  script:
+    - |
+      ssh $GITLAB_DEPLOY_USER@$IP_DEV_SERVER << EOF
+
+        echo "logs from container:"
+        echo "******************************************:"
+        docker logs triply-backend
+        echo "******************************************:"
+        echo "job has completed!"
+      EOF

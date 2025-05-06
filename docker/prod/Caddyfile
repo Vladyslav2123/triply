@@ -1,0 +1,7 @@
+:8080 {
+    root * /app/public
+    file_server
+    encode zstd gzip
+
+    php_fastcgi php-fpm:9000
+}

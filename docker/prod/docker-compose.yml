@@ -1,0 +1,77 @@
+services:
+    caddy:
+        image: caddy:latest
+        container_name: caddy
+        restart: unless-stopped
+        ports:
+            - "8080:8080"
+        volumes:
+            - ./Caddyfile:/etc/caddy/Caddyfile
+            - ./public:/app/public
+        networks:
+            - triply
+        depends_on:
+            php-fpm:
+                condition: service_healthy
+        command: [ "caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile" ]
+
+    php-fpm:
+        image: registry.triply.blog/triply/backend:prod
+        container_name: php-fpm
+        #user: "www-data:www-data"
+        user: "0:0"
+        restart: unless-stopped
+        volumes:
+            - ./storage:/app/storage
+            - ./public:/app/public
+        env_file:
+            - .env
+        networks:
+            - triply
+        healthcheck:
+            test: [ "CMD-SHELL", "php-fpm-healthcheck || exit 1" ]
+            interval: 10s
+            timeout: 5s
+            retries: 3
+
+    redis:
+        image: redis:alpine
+        container_name: redis
+        ports:
+            - "6379:6379"
+        restart: unless-stopped
+        volumes:
+            - redis-data:/data
+        networks:
+            - triply
+        # Health check for Redis
+        # -----------------------------------------------------------
+        # Checks if Redis is responding to the 'PING' command.
+        # This ensures that the service is not only running but also operational.
+        # -----------------------------------------------------------
+        healthcheck:
+            test: [ "CMD", "redis-cli", "ping" ]
+            interval: 10s
+            timeout: 5s
+            retries: 3
+
+#    php-cli:
+#        image: registry.triply.blog/triply/backend:prod
+#        container_name: php-cli
+#        restart: unless-stopped
+#        volumes:
+#            - .:/app/
+#        env_file:
+#            - .env
+#        networks:
+#            - triply
+
+
+networks:
+    triply:
+        driver: bridge
+        name: triply
+
+volumes:
+    redis-data:
+        driver: local

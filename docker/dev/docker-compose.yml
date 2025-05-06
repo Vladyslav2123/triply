@@ -1,0 +1,15 @@
+networks:
+  triply:
+    driver: bridge
+    name: triply
+
+services:
+  backend:
+    image: registry.triply.blog/triply/backend:dev
+    container_name: triply-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    networks:
+      - triply
+
